@@ -1,0 +1,420 @@
+cd ~/Documentos/invest-advisor
+cat > tutorial.html << 'HTMLEOF'
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Invest Advisor — Tutorial do Projeto</title>
+<style>
+  :root {
+    --bg: #0f172a; --panel: #1e293b; --accent: #38bdf8;
+    --green: #4ade80; --amber: #fbbf24; --red: #f87171;
+    --text: #e2e8f0; --muted: #94a3b8; --line: #334155;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg);
+         color: var(--text); line-height: 1.65; margin: 0; }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 2rem 1.5rem 4rem; }
+  h1 { color: var(--accent); font-size: 2rem; border-bottom: 3px solid var(--accent);
+       padding-bottom: .5rem; }
+  h2 { color: var(--accent); margin-top: 2.5rem; font-size: 1.4rem; }
+  h3 { color: var(--green); font-size: 1.1rem; }
+  code { background: #0b1220; border: 1px solid var(--line); border-radius: 4px;
+         padding: .1rem .4rem; font-size: .9em; color: var(--amber); }
+  pre { background: #0b1220; border: 1px solid var(--line); border-radius: 8px;
+        padding: 1rem; overflow-x: auto; font-size: .88rem; line-height: 1.5; }
+  pre code { background: none; border: none; color: var(--text); }
+  .box { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+         padding: 1rem 1.25rem; margin: 1rem 0; }
+  .ok    { border-left: 4px solid var(--green); }
+  .warn  { border-left: 4px solid var(--amber); }
+  .err   { border-left: 4px solid var(--red); }
+  .tip   { border-left: 4px solid var(--accent); }
+  .diagram { background: #0b1220; border: 1px solid var(--line); border-radius: 8px;
+             padding: 1.25rem; font-family: 'Cascadia Code', Consolas, monospace;
+             white-space: pre; overflow-x: auto; font-size: .82rem;
+             line-height: 1.45; color: var(--text); }
+  .diagram .hl { color: var(--accent); font-weight: bold; }
+  .diagram .g  { color: var(--green); }
+  .diagram .a  { color: var(--amber); }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .92rem; }
+  th, td { border: 1px solid var(--line); padding: .5rem .75rem; text-align: left; }
+  th { background: var(--panel); color: var(--accent); }
+  .badge { display: inline-block; padding: .15rem .6rem; border-radius: 999px;
+           font-size: .75rem; font-weight: 600; }
+  .b-ok { background: #14532d; color: var(--green); }
+  .b-warn { background: #713f12; color: var(--amber); }
+  .b-err { background: #7f1d1d; color: var(--red); }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  .flow-arrow { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>📚 Invest Advisor — Tutorial</h1>
+<p><em>Assistente RAG de pesquisa regulatória (CVM) com IA — do PDF à resposta citada.</em></p>
+
+<div class="box tip toc">
+<strong>Índice</strong>
+<ol>
+  <li><a href="#o-que">O que é o projeto</a></li>
+  <li><a href="#arquitetura">Arquitetura geral</a></li>
+  <li><a href="#setup">Setup e requisitos</a></li>
+  <li><a href="#banco">Banco de dados (pgvector)</a></li>
+  <li><a href="#ingestao">Ingestão de documentos</a></li>
+  <li><a href="#rag">O motor RAG (rag.py)</a></li>
+  <li><a href="#ui">Interface Chainlit</a></li>
+  <li><a href="#erros">Erros comuns e soluções</a></li>
+  <li><a href="#roadmap">Próximos passos</a></li>
+</ol>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="o-que">1. O que é o projeto</h2>
+
+<p>O <strong>Invest Advisor</strong> é um assistente que responde perguntas sobre
+regulação de investimentos no Brasil (normas da <strong>CVM</strong> — Comissão de
+Valores Mobiliários) usando apenas documentos oficiais como fonte.</p>
+
+<div class="box ok">
+<strong>Como funciona em uma frase:</strong> você pergunta em português → o sistema
+busca os trechos mais relevantes nos documentos → um LLM (Gemini) redige a resposta
+<strong>citando as fontes</strong> e incluindo disclaimer de não-recomendação.
+</div>
+
+<h3>Exemplo real (validado)</h3>
+<pre><code>Pergunta: "O que é a CVM?"
+
+Resposta: A CVM (Comissão de Valores Mobiliários) é o regulador do
+          mercado de capitais brasileiro [1].
+          Isto não constitui recomendação de investimento.
+
+📚 Fontes: docs/teste_cvm.md chunk 0 (vec=0.781, fts=0.194)</code></pre>
+
+<!-- ============================================================ -->
+<h2 id="arquitetura">2. Arquitetura geral</h2>
+
+<h3>Visão macro — dois fluxos</h3>
+<div class="diagram">
+<span class="hl">FLUXO A — INGESTÃO (offline, roda 1x por lote de docs)</span>
+
+  docs/*.md          data/cvm/           PostgreSQL + pgvector
+  ─────────┐         ─────────┐          ──────────────────────
+           ▼                  ▼                      ▲
+  ┌──────────────────────────────────┐               │
+  │         <span class="g">ingest.py</span>              │   INSERT      │
+  │  1. Lê arquivos (md + cache)     │   chunks +    │
+  │  2. Chunking (1200 / overlap 150)│───embeddings──┘
+  │  3. Embeddings gemini-001 (3072d)│
+  │  4. Upsert por (source, chunk)   │
+  └──────────────────────────────────┘
+
+<span class="hl">FLUXO B — CONSULTA (online, a cada pergunta)</span>
+
+  Usuário ──► <span class="g">app.py (Chainlit)</span> ──► <span class="g">rag.py</span>
+                                        │
+              ┌─────────────────────────┤
+              ▼                         ▼
+     <span class="a">RETRIEVE (híbrido)</span>        <span class="a">LLM (Gemini)</span>
+     ├─ KNN vetorial            ├─ recebe trechos + pergunta
+     │  (HNSW halfvec)          ├─ responde com citações [n]
+     └─ Full-text (ts_rank)     └─ disclaimer obrigatório
+              │                         ▲
+              ▼                         │
+        PostgreSQL              trechos como contexto
+</div>
+
+<h3>Detalhe do retrieve híbrido</h3>
+<p>A busca combina duas técnicas e faz merge dos resultados:</p>
+<div class="diagram">
+              pergunta: "O que é a CVM?"
+                      │
+         ┌────────────┴────────────┐
+         ▼                         ▼
+   <span class="a">Busca VETORIAL</span>          <span class="a">Busca FULL-TEXT</span>
+   embedding da pergunta     websearch_to_tsquery
+   (semântica: entende       ('portuguese') no
+   sinônimos, contexto)      conteúdo (palavras exatas)
+         │                         │
+   ORDER BY embedding        ORDER BY ts_rank DESC
+   ::halfvec(3072) &lt;=&gt;       LIMIT 4
+   %s::halfvec(3072)
+   LIMIT 4                         │
+         │                         │
+         └────────────┬────────────┘
+                      ▼
+        <span class="g">FULL OUTER JOIN USING (id)</span>
+        dedupe por (source, chunk_index)
+        cada hit traz vscore + fscore
+                      ▼
+              TOP_K = 4 trechos
+</div>
+
+<div class="box tip">
+<strong>Por que híbrido?</strong> A busca vetorial encontra trechos
+<em>semanticamente parecidos</em> (ex.: "orgão regulador" acha CVM, mesmo sem a
+palavra). O full-text garante precisão quando o usuário digita termos exatos
+(ex.: "Resolução CVM 30"). Juntos, cobrem os dois casos.
+</div>
+
+<!-- ============================================================ -->
+<h2 id="setup">3. Setup e requisitos</h2>
+
+<h3>Pré-requisitos</h3>
+<table>
+<tr><th>Item</th><th>Valor / versão</th><th>Observação</th></tr>
+<tr><td>Python</td><td>3.12 via <code>uv</code></td><td><code>uv sync</code> instala tudo do lock</td></tr>
+<tr><td>Docker</td><td>compose v2</td><td>banco + app</td></tr>
+<tr><td>Chave Gemini</td><td><code>GOOGLE_API_KEY</code></td><td>Google AI Studio</td></tr>
+<tr><td>Porta do banco</td><td><span class="badge b-warn">5434</span></td><td>5432 já ocupada pelo Postgres do sistema</td></tr>
+</table>
+
+<h3>Arquivo .env</h3>
+<pre><code>DATABASE_URL=postgresql://postgres:postgres@localhost:5434/invest_advisor
+GOOGLE_API_KEY=sua_chave_aqui
+EMBEDDING_MODEL=gemini-embedding-001
+CHAT_MODEL=gemini-flash-latest</code></pre>
+
+<div class="box err">
+<strong>Atenção:</strong> <code>gemini-2.0-flash</code> foi <strong>descontinuado</strong>
+(erro 404). <code>gemini-2.5-flash</code> retornou 404 em contas novas.
+Use <code>gemini-flash-latest</code>, que foi validado com 200 OK.
+</div>
+
+<h3>Comandos de uso diário</h3>
+<pre><code>uv sync                          # instalar dependências
+docker compose up -d             # subir banco
+uv run python ingest.py          # ingerir documentos
+uv run python rag.py "pergunta"  # testar RAG no terminal
+chainlit run app.py              # abrir UI em http://localhost:8000</code></pre>
+
+<!-- ============================================================ -->
+<h2 id="banco">4. Banco de dados (pgvector)</h2>
+
+<h3>Schema</h3>
+<pre><code>CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE documents (
+  id          SERIAL PRIMARY KEY,
+  source      TEXT NOT NULL,          -- ex: docs/teste_cvm.md
+  doc_type    TEXT,                   -- ex: regulacao
+  title       TEXT,
+  chunk_index INT  NOT NULL,
+  content     TEXT NOT NULL,
+  embedding   <span class="a">VECTOR(3072)</span> NOT NULL,   -- dim do gemini-embedding-001
+  UNIQUE (source, chunk_index)        -- chave do upsert
+);
+
+<span class="g">-- Índice HNSW: busca aproximada KNN muito rápida
+CREATE INDEX ON documents
+  USING hnsw ((embedding::halfvec(3072)) vector_cosine_ops);</span></code></pre>
+
+<div class="box tip">
+<strong>Por que <code>halfvec(3072)</code>?</strong> Um <code>VECTOR(3072)</code> puro
+consome ~12 KB por linha. O <code>halfvec</code> usa 2 bytes por dimensão (6 KB), cabendo no índice HNSW
+com performance melhor — e com precisão desprezível perdida.
+</div>
+
+<h3>Busca KNN no Python</h3>
+<pre><code># KNN vetorial com halfvec (pgvector)
+cur.execute("""
+    SELECT id, source, chunk_index, content,
+           1 - (embedding::halfvec(3072) &lt;=&gt; %s::halfvec(3072)) AS score
+    FROM documents
+    ORDER BY embedding::halfvec(3072) &lt;=&gt; %s::halfvec(3072)
+    LIMIT %s
+""", (query_vec, query_vec, TOP_K))</code></pre>
+
+<div class="box warn">
+<strong>Workflow SQL:</strong> nunca colar SQL direto no bash. Sempre salvar em
+arquivo com <code>cat &gt; arquivo.sql &lt;&lt; 'EOF'</code> e aplicar com
+<code>psql "$DATABASE_URL" -f arquivo.sql</code>. No psql, usar sempre
+<code>-P pager=off</code> para não travar no less.
+</div>
+
+<!-- ============================================================ -->
+<h2 id="ingestao">5. Ingestão de documentos</h2>
+
+<h3>Fluxo detalhado do ingest.py</h3>
+<div class="diagram">
+  ┌─────────────┐   ┌─────────────┐
+  │ docs/*.md   │   │ data/cvm/   │      fontes locais + cache
+  └──────┬──────┘   └──────┬──────┘
+         └───────┬─────────┘
+                 ▼
+  ┌───────────────────────────────┐
+  │ <span class="g">1. CHUNKING</span>                  │
+  │ RecursiveCharacterTextSplitter│
+  │ tamanho 1200 / overlap 150    │
+  └──────────────┬────────────────┘
+                 ▼
+  ┌───────────────────────────────┐
+  │ <span class="g">2. EMBEDDING</span>                  │
+  │ gemini-embedding-001 (3072d)  │
+  │ batches de 64 (economia/velo.)│
+  └──────────────┬────────────────┘
+                 ▼
+  ┌───────────────────────────────┐
+  │ <span class="g">3. UPSERT</span>                     │
+  │ ON CONFLICT (source,chunk_idx)│
+  │ → re-rodar é idempotente ✅   │
+  └───────────────────────────────┘
+</div>
+
+<div class="box ok">
+<strong>Idempotente:</strong> rodar <code>ingest.py</code> várias vezes não duplica
+dados — o upsert por <code>(source, chunk_index)</code> atualiza o que já existe.
+</div>
+
+<h3>Como adicionar novos documentos</h3>
+<pre><code>cp minha_cartilha_cvm.pdf.txt docs/   # texto extraído do PDF
+uv run python ingest.py               # re-rodar a ingestão</code></pre>
+
+<div class="box err">
+<strong>Corpus real:</strong> a URL <code>dados.cvm.gov.br/.../INSTRUMENTOS</code>
+retornou <strong>404</strong>. Enquanto não achamos o endereço novo, use PDFs
+oficiais baixados manualmente em <code>docs/</code> como fonte principal.
+</div>
+
+<!-- ============================================================ -->
+<h2 id="rag">6. O motor RAG (rag.py)</h2>
+
+<h3>Estrutura do módulo</h3>
+<div class="diagram">
+┌─────────────────────────── rag.py ───────────────────────────┐
+│                                                              │
+│  <span class="g">_embed(text)</span>        → vetor 3072d da pergunta            │
+│  <span class="g">_llm()</span>              → ChatGoogleGenerativeAI c/ fallback │
+│  <span class="g">retrieve(q, k=4)</span>    → busca híbrida (vec + fts)          │
+│  <span class="g">answer(q)</span>           → orquestra tudo e formata           │
+│                                                              │
+│  CLI: uv run python rag.py "pergunta"                        │
+└──────────────────────────────────────────────────────────────┘
+</div>
+
+<h3>Cadeia de fallback do LLM</h3>
+<div class="diagram">
+  pergunta chega
+       │
+       ▼
+  <span class="a">CHAT_MODEL</span> (do .env)
+       │ falhou (404/503)?
+       ▼
+  <span class="a">fallback 1</span> ──► <span class="a">fallback 2</span> ──► ... ──► <span class="err">raise</span>
+       │
+       ▼ (sucesso)
+  resposta com citações [n]
+  + disclaimer de não-recomendação
+</div>
+
+<h3>Prompt do synthesizer (regras)</h3>
+<div class="box tip">
+O LLM recebe as instruções:
+<ol>
+  <li>Responder <strong>somente</strong> com base nos trechos fornecidos</li>
+  <li>Citar as fontes no formato <code>[n]</code></li>
+  <li>Se não houver base nos trechos → dizer que não sabe</li>
+  <li>Sempre encerrar com o disclaimer de não-recomendação</li>
+</ol>
+</div>
+
+<h3>Formato da resposta</h3>
+<pre><code>Resposta: A CVM é o regulador do mercado de capitais brasileiro [1].
+Isto não constitui recomendação de investimento.
+
+📚 Fontes:
+  1. docs/teste_cvm.md chunk 0 (vec=0.781, fts=0.194)
+     └─ vec = similaridade cosseno vetorial (0-1, maior = melhor)
+     └─ fts = relevância full-text (ts_rank)</code></pre>
+
+<!-- ============================================================ -->
+<h2 id="ui">7. Interface Chainlit (app.py)</h2>
+
+<div class="diagram">
+  Navegador ──► chainlit run app.py ──► http://localhost:8000
+                        │
+                 on_message(msg)
+                        │
+                        ▼
+               answer(msg.content)   ← chama rag.py
+                        │
+                        ▼
+               ┌──────────────────────────────┐
+               │ resposta com citações [n]    │
+               │ + bloco "📚 Fontes" com      │
+               │   scores vec/fts             │
+               └──────────────────────────────┘
+</div>
+
+<div class="box warn">
+<strong>Warning inofensivo:</strong> "tradução pt-BR não encontrada" no log do
+Chainlit — ele usa en-US como padrão. Pode ignorar.
+</div>
+
+<!-- ============================================================ -->
+<h2 id="erros">8. Erros comuns e soluções</h2>
+
+<table>
+<tr><th>Erro</th><th>Causa</th><th>Solução</th></tr>
+<tr><td><code>404 NOT_FOUND</code> no chat</td>
+    <td>gemini-2.0-flash descontinuado</td>
+    <td><code>CHAT_MODEL=gemini-flash-latest</code> + fallbacks no rag.py</td></tr>
+<tr><td><code>404</code> no embedding</td>
+    <td>text-embedding-004 descontinuado</td>
+    <td><code>gemini-embedding-001</code> (dim 3072)</td></tr>
+<tr><td><code>503 UNAVAILABLE</code></td>
+    <td>alta demanda no free tier</td>
+    <td>tentar novamente / cadeia de fallback</td></tr>
+<tr><td><code>psycopg.errors.AmbiguousColumn</code></td>
+    <td>FULL OUTER JOIN USING(id) com colunas duplicadas</td>
+    <td>aliases prefixados (v_*, f_*) + COALESCE no SELECT</td></tr>
+<tr><td>LLM retorna <code>[{'type':'text',...}]</code></td>
+    <td>.content vira lista de blocos</td>
+    <td>join dos campos 'text' quando isinstance(msg, list)</td></tr>
+<tr><td>KeyError 'chunk'</td>
+    <td>chave desalinhada entre retrieve() e answer()</td>
+    <td>padronizar 'chunk_index'</td></tr>
+<tr><td>Latência de ~1 min</td>
+    <td>healthcheck <code>llm.invoke("ok")</code> + modelo 404</td>
+    <td>remover healthcheck; corrigir CHAT_MODEL no .env <span class="badge b-warn">pendente</span></td></tr>
+<tr><td>psql "suspenso"</td>
+    <td>pager (less) intercepta output</td>
+    <td><code>-P pager=off</code> ou <code>export PAGER=cat</code></td></tr>
+<tr><td>URL CVM 404</td>
+    <td>dataset movido</td>
+    <td>PDFs oficiais manuais em docs/</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2 id="roadmap">9. Próximos passos</h2>
+
+<ol>
+  <li><strong>Quick wins</strong> (5 min):
+    <ul>
+      <li>Corrigir <code>CHAT_MODEL</code> no .env → elimina o 404 do log</li>
+      <li>Remover o healthcheck do <code>_llm()</code> → respostas rápidas</li>
+    </ul>
+  </li>
+  <li><strong>Corpus real</strong>: baixar Resolução 175, regulamentos da CVM em PDF → docs/ → re-ingerir</li>
+  <li><strong>Grafo LangGraph</strong>: planner → retriever → synthesizer → compliance</li>
+  <li><strong>FastAPI</strong>: API REST ao lado da UI</li>
+  <li><strong>Langfuse</strong>: observabilidade de traces do agente</li>
+  <li><strong>Vertex AI</strong>: migração para produção</li>
+</ol>
+
+<div class="box ok">
+<strong>Estado atual:</strong> <span class="badge b-ok">MVP FUNCIONAL END-TO-END</span>
+— ingest → retrieve híbrido → Gemini → Chainlit, validado com pergunta real.
+</div>
+
+</div>
+</body>
+</html>
+HTMLEOF
+
+# Concatenar as duas partes (se salvou a parte 1) OU usar só a parte 2
+# Se você deletou o parcial, gere a parte 1 primeiro e depois:
+# cat tutorial_parte1.html tutorial_parte2.html > tutorial.html
