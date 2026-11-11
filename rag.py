@@ -3,10 +3,16 @@ rag.py — Motor RAG do invest-advisor
 Retriever hibrido (vetorial + full-text portugues) + LLM Gemini com fallback.
 Uso CLI: uv run python rag.py "sua pergunta"
 """
-import os, sys
+import os
+import sys
+from pathlib import Path
+
 import psycopg
-from psycopg.types.json import Json
+from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from psycopg.types.json import Json
+
+load_dotenv(Path(__file__).resolve().with_name(".env"))
 
 TOP_K = 4
 # Fallback: tenta na ordem se um modelo falhar (quota/timeout/indisponibilidade)
